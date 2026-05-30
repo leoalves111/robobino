@@ -4,6 +4,7 @@ Utilitários de conexão Binomo — validação defensiva antes de operações d
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -105,6 +106,85 @@ async def _safe_close(api: Optional[BinomoAPI]) -> None:
                 closer()
         except Exception:
             pass
+
+
+async def conectar_com_retry(
+    engine: Any,
+    *,
+    max_tentativas: int = 10,
+    intervalo_seg: float = 15.0,
+) -> bool:
+    """
+    Tenta conectar e valida check_connect() antes de prosseguir.
+    Backoff linear: intervalo_seg * tentativa.
+    """
+    for tentativa in range(1, max_tentativas + 1):
+        try:
+            if hasattr(engine, "is_connected") and engine.is_connected():
+                logger.info("Conexão já ativa — validada")
+                return True
+
+            if hasattr(engine, "test_connection"):
+                result = await engine.test_connection()
+                if result.get("connected") and not result.get("error"):
+                    api = getattr(engine, "_api", None)
+                    if api is None:
+                        logger.info(
+                            "Conexão estabelecida (modo sem API direta) tentativa %d/%d",
+                            tentativa,
+                            max_tentativas,
+                        )
+                        return True
+                    if check_connect(api):
+                        logger.info(
+                            "Conexão estabelecida e validada (tentativa %d/%d)",
+                            tentativa,
+                            max_tentativas,
+                        )
+                        return True
+                    logger.warning(
+                        "Tentativa %d/%d: connect() OK mas WebSocket inativo",
+                        tentativa,
+                        max_tentativas,
+                    )
+                else:
+                    logger.error(
+                        "Tentativa %d/%d: %s",
+                        tentativa,
+                        max_tentativas,
+                        result.get("error") or "Falha na conexão",
+                    )
+            elif hasattr(engine, "connect"):
+                await engine.connect()
+                api = getattr(engine, "_api", None)
+                if check_connect(api):
+                    logger.info("Conexão validada (tentativa %d/%d)", tentativa, max_tentativas)
+                    return True
+        except (BinomoConnectionError, BinomoAPIException, ConnectionError, OSError) as exc:
+            logger.error(
+                "Tentativa %d/%d: %s",
+                tentativa,
+                max_tentativas,
+                classify_connection_error(exc),
+            )
+        except Exception as exc:
+            logger.exception(
+                "Tentativa %d/%d — erro inesperado: %s",
+                tentativa,
+                max_tentativas,
+                exc,
+            )
+
+        if tentativa < max_tentativas:
+            espera = intervalo_seg * tentativa
+            logger.info("Aguardando %.0fs antes da próxima tentativa...", espera)
+            await asyncio.sleep(espera)
+
+    logger.critical(
+        "Falha na conexão após %d tentativas — verifique AUTH_TOKEN/DEVICE_ID/rede",
+        max_tentativas,
+    )
+    return False
 
 
 async def safe_get_candles(engine: Any, asset_ric: str | None = None) -> Any:

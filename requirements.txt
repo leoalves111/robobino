@@ -1,8 +1,30 @@
-BinomoAPI @ git+https://github.com/ChipaDevTeam/BinomoAPI
-pandas>=2.0.0
-pandas-ta>=0.3.14b
-python-dotenv>=1.0.0
-rich>=13.7.0
-aiohttp>=3.9.0
-websockets>=12.0
-requests>=2.31.0
+# Binomo Signal Generator — Python 3.12 (AWS/local)
+# Instalação: python -m venv .venv && pip install -r requirements.txt
+
+# API Binomo (commit fixado para reprodutibilidade)
+BinomoAPI @ git+https://github.com/ChipaDevTeam/BinomoAPI@2aab5504966bad2f256d523f8838620c33f0bb76
+
+# Core
+python-dotenv==1.2.2
+pandas==2.2.3
+numpy==2.2.6
+pandas-ta==0.4.71b0
+
+# HTTP / WebSocket
+aiohttp==3.13.5
+websockets==16.0
+requests==2.34.2
+urllib3==2.7.0
+certifi==2026.5.20
+charset-normalizer==3.4.7
+idna==3.17
+
+# UI (modo local com painel Rich)
+rich==15.0.0
+colorama==0.4.6
+
+# Transitive (pandas-ta / numba)
+numba==0.61.2
+llvmlite==0.44.0
+python-dateutil==2.9.0.post0
+tzdata==2026.2
