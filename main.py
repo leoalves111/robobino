@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from dotenv import load_dotenv
 
 from alert_system import Dashboard, DashboardState
+from api_connection import classify_connection_error, safe_get_candles
 from data_engine import DataEngine
 from mode_selector import exit_if_missing_auth_for_normal, prompt_run_mode
 from simulation_engine import SimulationEngine
@@ -32,6 +33,8 @@ load_dotenv()
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
+
+logger = logging.getLogger(__name__)
 
 
 class MarketEngine(Protocol):
@@ -145,6 +148,23 @@ async def balance_loop(engine: MarketEngine, stop_event: asyncio.Event, interval
         await engine.refresh_balance()
 
 
+async def ensure_engine_connected(engine: MarketEngine) -> bool:
+    """Garante API ativa antes de operações de mercado (modo normal)."""
+    if not isinstance(engine, DataEngine):
+        return True
+    if engine.is_connected():
+        return True
+    logger.warning("Conexão perdida — tentando reconectar...")
+    try:
+        await engine.connect()
+        return engine.is_connected()
+    except Exception as exc:
+        logger.error("%s", classify_connection_error(exc))
+        engine.state.status_message = classify_connection_error(exc)
+        engine.state.connected = False
+        return False
+
+
 async def analysis_loop(
     dashboard: Dashboard,
     engine: MarketEngine,
@@ -160,32 +180,49 @@ async def analysis_loop(
             candle = await asyncio.wait_for(engine.wait_closed_candle(), timeout=2.0)
         except asyncio.TimeoutError:
             continue
+        except (ConnectionError, OSError) as exc:
+            logger.warning("Rede instável no loop de análise: %s", exc)
+            await asyncio.sleep(3)
+            continue
 
         if candle is None or last_bucket == candle.timestamp:
             continue
         last_bucket = candle.timestamp
 
-        tag = "SIM" if simulation else "LIVE"
-        logging.warning(
-            "[%s] Vela fechada @ %s | close=%.5f | velas=%d | ticks=%d",
-            tag,
-            candle.timestamp.strftime("%H:%M"),
-            candle.close,
-            engine.state.candles_count,
-            engine.state.price_ticks,
-        )
+        try:
+            if not simulation and not await ensure_engine_connected(engine):
+                dashboard.state.analysis_hint = "Reconectando à Binomo..."
+                await asyncio.sleep(5)
+                continue
 
-        result = strategy.analyze(engine.get_dataframe())
-
-        if result.get("signal"):
-            dashboard.register_signal(
-                direction=result["signal"],
-                price=result.get("price", candle.close),
-                confidence=int(result.get("confidence") or 0),
-                reason=str(result.get("reason", "")),
+            tag = "SIM" if simulation else "LIVE"
+            logging.warning(
+                "[%s] Vela fechada @ %s | close=%.5f | velas=%d | ticks=%d",
+                tag,
+                candle.timestamp.strftime("%H:%M"),
+                candle.close,
+                engine.state.candles_count,
+                engine.state.price_ticks,
             )
-        else:
-            dashboard.state.analysis_hint = str(result.get("reason") or "Aguardando sinal...")
+
+            df = await safe_get_candles(engine)
+            result = strategy.analyze(df)
+
+            if result.get("signal"):
+                dashboard.register_signal(
+                    direction=result["signal"],
+                    price=result.get("price", candle.close),
+                    confidence=int(result.get("confidence") or 0),
+                    reason=str(result.get("reason", "")),
+                )
+            else:
+                dashboard.state.analysis_hint = str(
+                    result.get("reason") or "Aguardando sinal..."
+                )
+        except Exception as exc:
+            logger.exception("Erro temporário na análise de mercado: %s", exc)
+            dashboard.state.analysis_hint = f"Erro temporário — {exc}"
+            await asyncio.sleep(2)
 
 
 async def run_monitor_loop(
@@ -204,9 +241,18 @@ async def run_monitor_loop(
     state.strategy_name = strategy_mgr.name
     state.strategy_file = strategy_mgr.module_path.name if strategy_mgr.module_path else "—"
 
-    test = await engine.test_connection()
-    if test.get("error"):
-        logging.critical("Falha ao iniciar: %s", test["error"])
+    try:
+        test = await engine.test_connection()
+    except Exception as exc:
+        msg = classify_connection_error(exc)
+        logging.critical(msg)
+        print(f"\n[ERRO] {msg}\n", file=sys.stderr)
+        sys.exit(1)
+
+    if test.get("error") or not test.get("connected"):
+        msg = test.get("error") or "Falha na conexão — não foi possível autenticar"
+        logging.critical(msg)
+        print(f"\n[ERRO] {msg}\n", file=sys.stderr)
         sys.exit(1)
 
     state.connected = True
@@ -233,7 +279,7 @@ async def run_monitor_loop(
     sync_dashboard(state, engine, strategy_mgr)
 
     if simulation:
-        bootstrap = strategy_mgr.analyze(engine.get_dataframe())
+        bootstrap = strategy_mgr.analyze(await safe_get_candles(engine))
         state.analysis_hint = str(bootstrap.get("reason") or "Aguardando sinal...")
         if bootstrap.get("signal"):
             dashboard.register_signal(
@@ -304,14 +350,20 @@ async def main() -> None:
         return
 
     exit_if_missing_auth_for_normal()
-    engine = DataEngine(
-        auth_token=config["AUTH_TOKEN"],
-        device_id=config["DEVICE_ID"],
-        asset_name=config["ASSET_NAME"],
-        timeframe_seconds=int(config["TIMEFRAME_SECONDS"]),
-        demo=config["DEMO_MODE"].lower() in ("1", "true", "yes"),
-    )
-    await run_monitor_loop(engine, config, strategy_mgr, mode="normal")
+
+    try:
+        engine = DataEngine(
+            auth_token=config["AUTH_TOKEN"],
+            device_id=config["DEVICE_ID"],
+            asset_name=config["ASSET_NAME"],
+            timeframe_seconds=int(config["TIMEFRAME_SECONDS"]),
+            demo=config["DEMO_MODE"].lower() in ("1", "true", "yes"),
+        )
+        await run_monitor_loop(engine, config, strategy_mgr, mode="normal")
+    except (ConnectionError, OSError) as exc:
+        logger.error("%s", classify_connection_error(exc))
+        print(f"\n[ERRO] {classify_connection_error(exc)}\n", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -322,3 +374,7 @@ if __name__ == "__main__":
         sys.exit(1)
     except KeyboardInterrupt:
         pass
+    except Exception as exc:
+        msg = classify_connection_error(exc)
+        print(f"\n[ERRO] {msg}\n", file=sys.stderr)
+        sys.exit(1)

@@ -1,5 +1,6 @@
 """
-Estratégia compilada — RSI + EMA + MACD + Stochastic (M5 Crypto IDX).
+Estratégia compilada — default_strategy.txt (Crypto IDX M5).
+RSI + EMA(21) + MACD + SMA(50) + filtro ATR.
 """
 
 from __future__ import annotations
@@ -7,7 +8,7 @@ from __future__ import annotations
 import pandas as pd
 import pandas_ta as ta
 
-STRATEGY_NAME = "RSI + EMA + MACD Pro"
+STRATEGY_NAME = "RSI + EMA + MACD (Padrão)"
 MIN_CANDLES = 30
 
 
@@ -22,7 +23,6 @@ def analisar(df: pd.DataFrame) -> dict:
     work = df.copy()
     close = work["close"]
     work["rsi"] = ta.rsi(close, length=14)
-    work["ema9"] = ta.ema(close, length=9)
     work["ema21"] = ta.ema(close, length=21)
     work["sma50"] = ta.sma(close, length=50)
     work["atr"] = ta.atr(work["high"], work["low"], close, length=14)
@@ -32,78 +32,52 @@ def analisar(df: pd.DataFrame) -> dict:
         work["macd_hist"] = macd["MACDh_12_26_9"]
         work["macd_hist_prev"] = work["macd_hist"].shift(1)
 
-    stoch = ta.stoch(work["high"], work["low"], close, k=14, d=3)
-    if stoch is not None:
-        work["stoch_k"] = stoch.iloc[:, 0]
-        work["stoch_d"] = stoch.iloc[:, 1]
-
     row = work.iloc[-1]
     prev = work.iloc[-2]
     price = float(row["close"])
 
     atr = float(row.get("atr", 0) or 0)
-    if atr / price < 0.0002:
-        return {"signal": None, "price": price, "reason": "Mercado lateral (ATR baixo)"}
+    if atr / price < 0.0005:
+        return {"signal": None, "price": price, "reason": "Mercado lateral (ATR < 0,05%)"}
 
     rsi = float(row["rsi"])
     ema21 = float(row["ema21"])
     sma50 = float(row["sma50"])
     macd_hist = float(row.get("macd_hist", 0) or 0)
-    macd_rising = macd_hist > float(row.get("macd_hist_prev", macd_hist) or macd_hist)
-    stoch_k = float(row.get("stoch_k", 50) or 50)
+    macd_prev = float(row.get("macd_hist_prev", macd_hist) or macd_hist)
+    macd_rising = macd_hist > macd_prev
+    macd_falling = macd_hist < macd_prev
 
-    trend_up = float(row["ema9"]) > ema21 > sma50
-    trend_down = float(row["ema9"]) < ema21 < sma50
+    if rsi < 30 and price > ema21 and price > sma50:
+        if macd_hist > 0 or macd_rising:
+            conf = 55
+            if rsi < 25:
+                conf += 10
+            if macd_hist > 0 and macd_rising:
+                conf += 15
+            return {
+                "signal": "COMPRA",
+                "price": price,
+                "reason": "RSI sobrevenda + acima EMA21/SMA50 + MACD",
+                "confidence": min(90, conf),
+            }
 
-    buy_score = 0
-    if rsi < 32:
-        buy_score += 25
-    elif rsi < 40:
-        buy_score += 12
-    if price > ema21:
-        buy_score += 15
-    if trend_up:
-        buy_score += 20
-    if macd_hist > 0 and macd_rising:
-        buy_score += 20
-    if stoch_k < 25 and stoch_k > float(prev.get("stoch_k", stoch_k) or stoch_k):
-        buy_score += 15
-    if price > sma50:
-        buy_score += 10
-
-    sell_score = 0
-    if rsi > 68:
-        sell_score += 25
-    elif rsi > 60:
-        sell_score += 12
-    if price < ema21:
-        sell_score += 15
-    if trend_down:
-        sell_score += 20
-    if macd_hist < 0 and not macd_rising:
-        sell_score += 20
-    if stoch_k > 75 and stoch_k < float(prev.get("stoch_k", stoch_k) or stoch_k):
-        sell_score += 15
-    if price < sma50:
-        sell_score += 10
-
-    if buy_score >= 45 and buy_score > sell_score + 8:
-        return {
-            "signal": "COMPRA",
-            "price": price,
-            "reason": "Pullback em tendência + MACD/Stoch",
-            "confidence": min(95, buy_score),
-        }
-    if sell_score >= 45 and sell_score > buy_score + 8:
-        return {
-            "signal": "VENDA",
-            "price": price,
-            "reason": "Pullback em tendência + MACD/Stoch",
-            "confidence": min(95, sell_score),
-        }
+    if rsi > 70 and price < ema21 and price < sma50:
+        if macd_hist < 0 or macd_falling:
+            conf = 55
+            if rsi > 75:
+                conf += 10
+            if macd_hist < 0 and macd_falling:
+                conf += 15
+            return {
+                "signal": "VENDA",
+                "price": price,
+                "reason": "RSI sobrecompra + abaixo EMA21/SMA50 + MACD",
+                "confidence": min(90, conf),
+            }
 
     return {
         "signal": None,
         "price": price,
-        "reason": f"Setup incompleto (C:{buy_score} V:{sell_score})",
+        "reason": f"Aguardando setup (RSI {rsi:.0f})",
     }

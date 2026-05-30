@@ -17,6 +17,7 @@ import requests
 from BinomoAPI.api import BinomoAPI
 from BinomoAPI.exceptions import BinomoAPIException, ConnectionError as BinomoConnectionError
 
+from api_connection import check_connect, classify_connection_error
 from candle_cache import MAX_CACHE_CANDLES, CandleCache
 
 logger = logging.getLogger(__name__)
@@ -230,7 +231,22 @@ class DataEngine:
         self.state.cache_status = f"{self._cache.last_status} ({len(trimmed)})"
         logger.info("Histórico carregado via %s: %d velas M5", source, len(trimmed))
 
+    def is_connected(self) -> bool:
+        return self.state.connected and check_connect(self._api)
+
+    async def get_candles_safe(self):
+        """Velas para análise — seguro se API cair (usa buffer local)."""
+        if not self.is_connected():
+            logger.warning("get_candles_safe: API desconectada — usando velas em memória")
+        return self.get_dataframe()
+
     async def connect(self) -> None:
+        if not self.auth_token or not self.device_id:
+            raise BinomoAPIException(
+                "Erro de autenticação — AUTH_TOKEN ou DEVICE_ID ausentes"
+            )
+
+        await self._cleanup()
         raw_api = BinomoAPI(
             auth_token=self.auth_token,
             device_id=self.device_id,
@@ -239,29 +255,42 @@ class DataEngine:
         )
         self._api = ReadOnlyBinomoAPI(raw_api)
 
-        ric = self._api.get_asset_ric(self.asset_name)
-        if ric:
-            self.asset_ric = ric
+        try:
+            ric = self._api.get_asset_ric(self.asset_name)
+            if ric:
+                self.asset_ric = ric
 
-        await self._api.connect()
-        await self._subscribe_asset_channel()
-        await self._load_historical_candles()
+            ok = await self._api.connect()
+            if not ok or not check_connect(self._api):
+                raise BinomoConnectionError(
+                    "Falha na conexão — WebSocket não estabelecido"
+                )
 
-        initial_rate = await asyncio.to_thread(self._fetch_live_rate_sync)
-        if initial_rate:
-            self._apply_price(initial_rate)
-            logger.info("Preço inicial via REST: %.5f", initial_rate)
+            await self._subscribe_asset_channel()
+            await self._load_historical_candles()
 
-        balance = await self._fetch_balance()
-        self.state.balance = balance
+            initial_rate = await asyncio.to_thread(self._fetch_live_rate_sync)
+            if initial_rate:
+                self._apply_price(initial_rate)
+                logger.info("Preço inicial via REST: %.5f", initial_rate)
 
-        self.state.connected = True
-        self.state.status_message = "Monitorando Crypto IDX M5"
-        self.state.reconnect_attempts = 0
-        logger.debug("Conectado ao ativo %s (%s)", self.asset_name, self.asset_ric)
+            balance = await self._fetch_balance()
+            self.state.balance = balance
+
+            self.state.connected = True
+            self.state.status_message = "Monitorando Crypto IDX M5"
+            self.state.reconnect_attempts = 0
+            logger.info("Conectado ao ativo %s (%s)", self.asset_name, self.asset_ric)
+        except Exception:
+            self.state.connected = False
+            await self._cleanup()
+            raise
 
     async def _subscribe_asset_channel(self) -> None:
-        assert self._api is not None
+        if self._api is None or not check_connect(self._api):
+            raise BinomoConnectionError(
+                "Falha na conexão — impossível inscrever no canal do ativo"
+            )
         api = self._api.raw
         channel = f"asset:{self.asset_ric}"
         payload = {
@@ -415,7 +444,8 @@ class DataEngine:
                 await self._handle_disconnect(str(exc))
 
     async def _process_websocket_messages(self) -> None:
-        assert self._api is not None
+        if self._api is None or not check_connect(self._api):
+            raise BinomoConnectionError("WebSocket não conectado")
         ws = self._api.raw._ws_client
         if ws is None:
             raise BinomoConnectionError("WebSocket não inicializado")
@@ -649,10 +679,14 @@ class DataEngine:
         }
         try:
             await self.connect()
+            if self._api is None or not self.is_connected():
+                result["error"] = "Falha na conexão — API não inicializada"
+                return result
             balance = await self._api.get_balance()
             result["connected"] = True
             result["balance"] = balance.amount if balance else None
         except Exception as exc:
-            result["error"] = str(exc)
+            result["error"] = classify_connection_error(exc)
+            logger.error(result["error"])
             await self._cleanup()
         return result
