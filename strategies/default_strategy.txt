@@ -1,0 +1,19 @@
+ESTRATÉGIA PADRÃO - Crypto IDX M5
+
+Regras de COMPRA (CALL):
+- RSI(14) abaixo de 30 (sobrevenda)
+- Preço de fechamento acima da EMA(21)
+- MACD histograma positivo ou cruzando para cima
+
+Regras de VENDA (PUT):
+- RSI(14) acima de 70 (sobrecompra)
+- Preço de fechamento abaixo da EMA(21)
+- MACD histograma negativo ou cruzando para baixo
+
+Confirmação adicional:
+- Usar SMA(50) como filtro de tendência: compra apenas se close > SMA(50), venda apenas se close < SMA(50)
+- Evitar sinais quando ATR(14) estiver abaixo de 0.05% do preço (mercado lateral)
+
+Gestão:
+- Operar apenas no fechamento da vela M5
+- Um sinal por vela fechada
