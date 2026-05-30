@@ -18,6 +18,7 @@ import pandas_ta as ta
 from order_guard import OrderGuard
 from strategy_manager import StrategyManager
 from strategy_registry import FALLBACK_STRATEGY_FILE, STRATEGY_CATALOG, entry_for_file
+from trade_log import OrchestratorLogState, log_orchestrator_change
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class StrategyOrchestrator:
         self._candles_since_switch: int = SWITCH_COOLDOWN_CANDLES
         self._cycle_index: int = 0
         self._last_decision: OrchestratorDecision | None = None
+        self._orch_log = OrchestratorLogState()
 
         self._atr_low = float(os.getenv("ORCH_ATR_LOW_PCT", "0.00018"))
         self._atr_high = float(os.getenv("ORCH_ATR_HIGH_PCT", "0.00035"))
@@ -351,7 +353,7 @@ class StrategyOrchestrator:
             self._current_file = target_file
             self._candles_since_switch = 0
             logger.info(
-                "ORQUESTRADOR | Troca -> %s (%s) score=%.0f",
+                "Troca estrategia -> %s (%s) score=%.0f",
                 target_file,
                 _strategy_label(target_file),
                 target_score,
@@ -372,15 +374,30 @@ class StrategyOrchestrator:
         )
         self._last_decision = decision
 
-        top3 = " | ".join(f"{f.replace('_m5.py','')}({s:.0f})" for f, s in ranking[:3])
-        log_msg = (
-            f"ORQUESTRADOR | [{market.market_type.value}] {market.summary} | "
-            f"Top3: {top3 or 'n/a'} | ATIVA: {self._current_file} "
-            f"({_strategy_label(self._current_file)}) score={target_score:.0f}"
+        mtype_val = market.market_type.value
+        if self._orch_log.should_log(
+            mtype_val, self._current_file, switched=switched, first=self._cycle_index == 1
+        ):
+            log_orchestrator_change(
+                mtype_val,
+                self._current_file,
+                target_score,
+                switched=switched,
+                summary=market.summary,
+                top3=ranking[:3],
+                blocked=blocked,
+            )
+            self._orch_log.update(mtype_val, self._current_file)
+        elif blocked:
+            logger.debug("ORCH bloqueado: %s", blocked)
+
+        logger.debug(
+            "ORCH ciclo | %s | %s | score=%.0f | Top3=%s",
+            mtype_val,
+            self._current_file,
+            target_score,
+            ranking[:3],
         )
-        if blocked:
-            log_msg += f" | {blocked}"
-        logger.info(log_msg)
 
         return decision
 

@@ -33,6 +33,7 @@ from strategy_validator import (
     exit_on_validation_error,
     run_startup_validation,
 )
+from trade_log import HeartbeatTracker, log_candle_closed, log_candle_no_signal, log_heartbeat, log_signal
 
 logger = logging.getLogger(__name__)
 
@@ -144,34 +145,30 @@ async def headless_status_loop(
     strategy: StrategyManager,
     stop_event: asyncio.Event,
     orchestrator: StrategyOrchestrator | None = None,
-    interval: int = 30,
+    interval: int | None = None,
 ) -> None:
-    """Log periódico para pm2 logs (sem painel Rich)."""
+    """Heartbeat enxuto para pm2 — sem repetir filtros a cada ciclo."""
+    import os
+
+    tick_sec = interval or int(os.getenv("STATUS_INTERVAL_SEC", "120"))
+    tracker = HeartbeatTracker()
     while not stop_event.is_set():
         try:
             connected = engine.state.connected
             if isinstance(engine, DataEngine):
                 connected = engine.is_connected()
-            orch_hint = ""
-            if orchestrator and orchestrator.last_decision:
-                d = orchestrator.last_decision
-                orch_hint = f" | orch={d.market.market_type.value}→{d.strategy_file}"
-            logger.info(
-                "STATUS | conectado=%s | preço=%s | velas=%d | ticks=%d | rsi=%.0f | ordem=%s%s | %s",
-                connected,
-                f"{engine.state.last_price:.5f}" if engine.state.last_price else "—",
-                engine.state.candles_count,
-                engine.state.price_ticks,
-                strategy.market_context.rsi,
-                getattr(engine.state, "order_status", "NONE"),
-                orch_hint,
-                strategy.last_analysis.get("reason", "aguardando")[:50]
-                if strategy.last_analysis
-                else "aguardando",
-            )
+            price = engine.state.last_price
+            if tracker.should_log(connected=connected, price=price):
+                log_heartbeat(
+                    connected=connected,
+                    price=price,
+                    velas=engine.state.candles_count,
+                    order_status=getattr(engine.state, "order_status", "NONE"),
+                )
+                tracker.mark(connected=connected, price=price)
         except Exception as exc:
             logger.warning("Erro no status loop: %s", exc)
-        await asyncio.sleep(interval)
+        await asyncio.sleep(tick_sec)
 
 
 async def dashboard_loop(
@@ -248,17 +245,17 @@ async def analysis_loop(
                 continue
 
             tag = "SIM" if simulation else "LIVE"
-            logger.info(
-                "[%s] Vela fechada @ %s | close=%.5f | velas=%d | ticks=%d",
+            candle_time = candle.timestamp.strftime("%H:%M")
+            log_candle_closed(
                 tag,
-                candle.timestamp.strftime("%H:%M"),
+                candle_time,
                 candle.close,
                 engine.state.candles_count,
-                engine.state.price_ticks,
             )
 
             df = await safe_get_candles(engine)
             result = orchestrator.analyze(df)
+            orch = result.get("orchestrator") or {}
 
             if result.get("signal"):
                 direction = result["signal"]
@@ -275,22 +272,25 @@ async def analysis_loop(
                         reason=reason,
                     )
                 else:
-                    logger.critical(
-                        "SINAL %s | conf=%d%% | preço=%.5f | %s",
+                    log_signal(
                         direction,
                         confidence,
-                        price,
+                        float(price),
                         reason,
+                        strategy_file=str(orch.get("strategy_file", "")),
+                        market_type=str(orch.get("market_type", "")),
                     )
             elif dashboard:
                 dashboard.state.analysis_hint = str(
                     result.get("reason") or "Aguardando sinal..."
                 )
             else:
-                hint = str(result.get("reason") or "aguardando")[:80]
-                orch = result.get("orchestrator") or {}
-                strat = orch.get("strategy_file", "?")
-                logger.info("ANALISE | sem sinal | %s | %s", strat, hint)
+                log_candle_no_signal(
+                    candle_time,
+                    market_type=str(orch.get("market_type", "")),
+                    strategy_file=str(orch.get("strategy_file", "")),
+                    reason=str(result.get("reason") or "aguardando"),
+                )
         except Exception as exc:
             logger.exception("Erro temporário na análise: %s", exc)
             if dashboard:

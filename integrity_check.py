@@ -65,6 +65,7 @@ def check_imports(report: IntegrityReport) -> None:
         "orchestrator",
         "binary_master",
         "bot_settings",
+        "trade_log",
         "order_guard",
         "simulation_engine",
         "simulation_data",

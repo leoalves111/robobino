@@ -10,6 +10,21 @@ from pathlib import Path
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+TRADE_LOG_NAME = "binomo.trade"
+TRADE_FORMAT = "%(asctime)s | %(message)s"
+
+
+class ConsoleFormatter(logging.Formatter):
+    """Console: linhas curtas para binomo.trade; detalhe para demais módulos."""
+
+    def __init__(self) -> None:
+        super().__init__(LOG_FORMAT, datefmt=DATE_FORMAT)
+        self._trade = logging.Formatter(TRADE_FORMAT, datefmt=DATE_FORMAT)
+
+    def format(self, record: logging.LogRecord) -> str:
+        if record.name == TRADE_LOG_NAME:
+            return self._trade.format(record)
+        return super().format(record)
 
 
 def setup_logging(
@@ -31,7 +46,7 @@ def setup_logging(
     root.handlers.clear()
     root.setLevel(logging.DEBUG)
 
-    formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
+    formatter = ConsoleFormatter()
 
     if console:
         stdout_handler = logging.StreamHandler(sys.stdout)
@@ -45,7 +60,7 @@ def setup_logging(
             encoding="utf-8",
         )
         file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT))
         root.addHandler(file_handler)
 
     for noisy in ("BinomoAPI", "urllib3", "websockets", "asyncio"):
