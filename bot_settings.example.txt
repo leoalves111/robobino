@@ -1,3 +1,1 @@
-# Copie para bot_settings.txt se o arquivo não existir.
-# Altere só o número quando adicionar novas estratégias compiladas.
-2
+MODO=auto

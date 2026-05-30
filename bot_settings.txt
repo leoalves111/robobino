@@ -1,9 +1,8 @@
-# Troque APENAS o número da estratégia (1, 2, 3, 4, ...)
-# A lista completa aparece nos logs ao iniciar (pm2 logs).
+# Robô 100% autónomo 24/7 — NÃO edite números de estratégia aqui.
+# O orquestrador analisa ATR, ADX, Bollinger e tendência a cada vela M5
+# e escolhe automaticamente a melhor estratégia entre as 8 compiladas.
 #
-# 1 = Estratégia padrão (default_strategy)
-# 2 = Fluxo & Pullback M5 Pro  ← PADRÃO DO ROBÔ
-# 3 = Retração M5
+# Credenciais: .env (AUTH_TOKEN, DEVICE_ID)
+# Logs: pm2 logs  ou  logs/signal_generator.log
 #
-# Formas aceitas: só o número na linha abaixo, ou ESTRATEGIA=2
-2
+MODO=auto

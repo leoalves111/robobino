@@ -22,9 +22,12 @@ from api_connection import (
 from config import AppConfig, load_env
 from data_engine import DataEngine
 from logging_config import setup_logging
-from bot_settings import DEFAULT_RUN_MODE, load_strategy_by_number, read_bot_settings
+from bot_settings import DEFAULT_RUN_MODE, log_strategy_catalog, read_bot_settings
+from order_guard import OrderGuard
+from orchestrator import StrategyOrchestrator
 from simulation_engine import SimulationEngine
 from strategy_manager import StrategyManager
+from strategy_registry import validate_compiled_dir
 from strategy_validator import (
     StrategyValidationError,
     exit_on_validation_error,
@@ -50,33 +53,41 @@ class MarketEngine(Protocol):
     async def refresh_balance(self): ...
 
 
-def resolve_startup(config: AppConfig, strategy_mgr: StrategyManager) -> str:
+def resolve_startup(
+    config: AppConfig,
+    strategy_mgr: StrategyManager,
+) -> str:
     """
-    Início 100% autónomo: lê bot_settings.txt (número da estratégia) e modo normal real.
-    Nunca pergunta estratégia nem modo — adequado a PM2 24/7.
+    Arranque 100% autónomo — orquestrador escolhe a melhor estratégia a cada vela M5.
+    Sem estratégia fixa, sem perguntas, sem números no bot_settings.
     """
-    settings = read_bot_settings()
-    loaded = load_strategy_by_number(config.compiled_dir, settings.strategy_number)
-    strategy_mgr.activate(loaded)
+    read_bot_settings()
 
     mode = DEFAULT_RUN_MODE
     if config.run_mode and config.run_mode != "normal":
         logger.warning(
-            "RUN_MODE=%s ignorado — o robô opera sempre em modo normal (velas M5 reais).",
+            "RUN_MODE=%s ignorado — modo normal M5 real.",
             config.run_mode,
         )
 
+    missing = validate_compiled_dir(config.compiled_dir)
+    if missing:
+        raise EnvironmentError(
+            f"Estrategias ausentes em compiled_strategies/: {', '.join(missing)}"
+        )
+
+    log_strategy_catalog(config.compiled_dir)
     logger.info(
-        "Arranque autónomo | estrategia #%d = %s (%s) | modo=%s | 24/7",
-        settings.strategy_number,
-        loaded.name,
-        loaded.module_path.name,
-        mode,
+        "Arranque autonomo | orquestrador inteligente | 8 estrategias | 24/7 | sem input()"
     )
     return mode
 
 
-def create_engine(config: AppConfig, mode: str) -> MarketEngine:
+def create_engine(
+    config: AppConfig,
+    mode: str,
+    order_guard: OrderGuard | None = None,
+) -> MarketEngine:
     if mode == "simulation":
         return SimulationEngine(asset_name=config.asset_name)
     config.validate_auth()
@@ -86,6 +97,7 @@ def create_engine(config: AppConfig, mode: str) -> MarketEngine:
         asset_name=config.asset_name,
         timeframe_seconds=config.timeframe_seconds,
         demo=config.demo_mode,
+        order_guard=order_guard,
     )
 
 
@@ -131,6 +143,7 @@ async def headless_status_loop(
     engine: MarketEngine,
     strategy: StrategyManager,
     stop_event: asyncio.Event,
+    orchestrator: StrategyOrchestrator | None = None,
     interval: int = 30,
 ) -> None:
     """Log periódico para pm2 logs (sem painel Rich)."""
@@ -139,14 +152,20 @@ async def headless_status_loop(
             connected = engine.state.connected
             if isinstance(engine, DataEngine):
                 connected = engine.is_connected()
+            orch_hint = ""
+            if orchestrator and orchestrator.last_decision:
+                d = orchestrator.last_decision
+                orch_hint = f" | orch={d.market.market_type.value}→{d.strategy_file}"
             logger.info(
-                "STATUS | conectado=%s | preço=%s | velas=%d | ticks=%d | rsi=%.0f | %s",
+                "STATUS | conectado=%s | preço=%s | velas=%d | ticks=%d | rsi=%.0f | ordem=%s%s | %s",
                 connected,
                 f"{engine.state.last_price:.5f}" if engine.state.last_price else "—",
                 engine.state.candles_count,
                 engine.state.price_ticks,
                 strategy.market_context.rsi,
-                strategy.last_analysis.get("reason", "aguardando")[:60]
+                getattr(engine.state, "order_status", "NONE"),
+                orch_hint,
+                strategy.last_analysis.get("reason", "aguardando")[:50]
                 if strategy.last_analysis
                 else "aguardando",
             )
@@ -200,6 +219,8 @@ async def analysis_loop(
     strategy: StrategyManager,
     config: AppConfig,
     stop_event: asyncio.Event,
+    orchestrator: StrategyOrchestrator,
+    order_guard: OrderGuard,
     *,
     simulation: bool = False,
 ) -> None:
@@ -237,13 +258,15 @@ async def analysis_loop(
             )
 
             df = await safe_get_candles(engine)
-            result = strategy.analyze(df)
+            result = orchestrator.analyze(df)
 
             if result.get("signal"):
                 direction = result["signal"]
                 price = result.get("price", candle.close)
                 confidence = int(result.get("confidence") or 0)
                 reason = str(result.get("reason", ""))
+                if order_guard is not None:
+                    order_guard.on_signal_emitted()
                 if dashboard:
                     dashboard.register_signal(
                         direction=direction,
@@ -263,6 +286,11 @@ async def analysis_loop(
                 dashboard.state.analysis_hint = str(
                     result.get("reason") or "Aguardando sinal..."
                 )
+            else:
+                hint = str(result.get("reason") or "aguardando")[:80]
+                orch = result.get("orchestrator") or {}
+                strat = orch.get("strategy_file", "?")
+                logger.info("ANALISE | sem sinal | %s | %s", strat, hint)
         except Exception as exc:
             logger.exception("Erro temporário na análise: %s", exc)
             if dashboard:
@@ -274,6 +302,7 @@ async def run_monitor_loop(
     engine: MarketEngine,
     config: AppConfig,
     strategy_mgr: StrategyManager,
+    order_guard: OrderGuard,
     *,
     mode: str = "normal",
 ) -> None:
@@ -295,6 +324,8 @@ async def run_monitor_loop(
     dashboard: Dashboard | None = None
     state: DashboardState | None = None
 
+    orchestrator = StrategyOrchestrator(strategy_mgr, order_guard, config.compiled_dir)
+
     if not config.headless:
         state = DashboardState(asset_name=config.asset_name)
         state.mode = "SIMULAÇÃO" if simulation else "READ-ONLY"
@@ -313,7 +344,8 @@ async def run_monitor_loop(
         )
         sync_dashboard(state, engine, strategy_mgr)
 
-        bootstrap = strategy_mgr.analyze(await safe_get_candles(engine))
+        bootstrap_df = await safe_get_candles(engine)
+        bootstrap = orchestrator.analyze(bootstrap_df)
         state.analysis_hint = str(bootstrap.get("reason") or "Aguardando sinal...")
         if bootstrap.get("signal") and dashboard:
             dashboard.register_signal(
@@ -329,7 +361,14 @@ async def run_monitor_loop(
         asyncio.create_task(engine.clock_loop(), name="clock"),
         asyncio.create_task(
             analysis_loop(
-                dashboard, engine, strategy_mgr, config, stop_event, simulation=simulation
+                dashboard,
+                engine,
+                strategy_mgr,
+                config,
+                stop_event,
+                simulation=simulation,
+                orchestrator=orchestrator,
+                order_guard=order_guard,
             ),
             name="analysis",
         ),
@@ -338,7 +377,10 @@ async def run_monitor_loop(
     if config.headless:
         tasks.append(
             asyncio.create_task(
-                headless_status_loop(engine, strategy_mgr, stop_event), name="status"
+                headless_status_loop(
+                    engine, strategy_mgr, stop_event, orchestrator=orchestrator
+                ),
+                name="status",
             )
         )
     elif dashboard and state:
@@ -380,7 +422,12 @@ async def run_monitor_loop(
         await _run_tasks()
 
 
-async def run_resilient(config: AppConfig, strategy_mgr: StrategyManager, mode: str) -> None:
+async def run_resilient(
+    config: AppConfig,
+    strategy_mgr: StrategyManager,
+    order_guard: OrderGuard,
+    mode: str,
+) -> None:
     """
     Loop externo AWS: reconecta em falhas sem encerrar o processo (pm2 keep-alive).
     """
@@ -389,8 +436,12 @@ async def run_resilient(config: AppConfig, strategy_mgr: StrategyManager, mode: 
         tentativa_global += 1
         engine: MarketEngine | None = None
         try:
-            logger.info("=== Sessão #%d iniciando (modo=%s) ===", tentativa_global, mode)
-            engine = create_engine(config, mode)
+            logger.info(
+                "=== Sessao #%d | modo=%s | orquestrador=ativo ===",
+                tentativa_global,
+                mode,
+            )
+            engine = create_engine(config, mode, order_guard=order_guard)
 
             ok = await conectar_com_retry(
                 engine,
@@ -402,7 +453,13 @@ async def run_resilient(config: AppConfig, strategy_mgr: StrategyManager, mode: 
                 await asyncio.sleep(60)
                 continue
 
-            await run_monitor_loop(engine, config, strategy_mgr, mode=mode)
+            await run_monitor_loop(
+                engine,
+                config,
+                strategy_mgr,
+                order_guard,
+                mode=mode,
+            )
             logger.info("Sessão #%d encerrada normalmente", tentativa_global)
             break
 
@@ -438,11 +495,10 @@ async def main() -> None:
     config = AppConfig.from_env()
     setup_logging(log_dir=config.log_dir, level=config.log_level)
 
-    bot = read_bot_settings()
+    read_bot_settings()
     logger.info(
-        "Binomo Signal Generator iniciando | headless=%s | estrategia #%d (bot_settings.txt)",
+        "Binomo Signal Generator | headless=%s | orquestrador autonomo 24/7",
         config.headless,
-        bot.strategy_number,
     )
 
     try:
@@ -455,14 +511,18 @@ async def main() -> None:
         exit_on_validation_error(exc, headless=config.headless)
 
     strategy_mgr = StrategyManager(compiled_dir=config.compiled_dir)
+    order_guard = OrderGuard(
+        lock_on_signal_seconds=config.timeframe_seconds,
+        lock_on_signal=True,
+    )
     mode = resolve_startup(config, strategy_mgr)
 
     if mode == "normal":
         config.validate_auth()
         logger.info("Credenciais .env validadas (AUTH_TOKEN + DEVICE_ID)")
 
-    logger.info("Entrando em loop resiliente 24/7 — pm2 logs para monitorar")
-    await run_resilient(config, strategy_mgr, mode)
+    logger.info("Loop resiliente 24/7 — pm2 logs para monitorar")
+    await run_resilient(config, strategy_mgr, order_guard, mode)
 
 
 if __name__ == "__main__":

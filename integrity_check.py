@@ -61,6 +61,11 @@ def check_imports(report: IntegrityReport) -> None:
         "strategy_manager",
         "strategy_loader",
         "strategy_validator",
+        "strategy_registry",
+        "orchestrator",
+        "binary_master",
+        "bot_settings",
+        "order_guard",
         "simulation_engine",
         "simulation_data",
         "alert_system",
@@ -82,19 +87,31 @@ def check_env(report: IntegrityReport) -> None:
 
 
 def check_strategy_sync(report: IntegrityReport) -> None:
-    from strategy_validator import validate_all_strategies
+    from strategy_registry import catalog_filenames
 
-    try:
-        results = validate_all_strategies("strategies", "compiled_strategies")
-        report.add("estrategias:txt_vs_py", True, f"{len(results)} OK")
-    except Exception as exc:
-        report.add("estrategias:txt_vs_py", False, str(exc))
+    base = ROOT / "strategies"
+    compiled = ROOT / "compiled_strategies"
+    issues = 0
+    for name in catalog_filenames():
+        stem = Path(name).stem
+        for ext in (".txt", ".pdf"):
+            source = base / f"{stem}{ext}"
+            if source.is_file():
+                from strategy_validator import check_strategy
+
+                msg = check_strategy(source, compiled)
+                if msg:
+                    report.add(f"estrategias:sync:{stem}", False, msg[:80])
+                    issues += 1
+    if issues == 0:
+        report.add("estrategias:txt_vs_py", True, f"{len(catalog_filenames())} registradas")
 
 
 def check_strategies_analyze(report: IntegrityReport) -> None:
     import numpy as np
     import pandas as pd
     from strategy_manager import StrategyManager
+    from strategy_registry import catalog_filenames
 
     rng = np.random.default_rng(0)
     rows = 80
@@ -111,7 +128,11 @@ def check_strategies_analyze(report: IntegrityReport) -> None:
     )
 
     mgr = StrategyManager()
-    for name in mgr.list_available():
+    for name in catalog_filenames():
+        path = ROOT / "compiled_strategies" / name
+        if not path.is_file():
+            report.add(f"estrategia:{name}", False, "arquivo ausente")
+            continue
         try:
             mgr.load(name)
             result = mgr.analyze(df)
@@ -191,7 +212,7 @@ async def check_simulation(report: IntegrityReport) -> None:
         asyncio.create_task(engine.clock_loop()),
     ]
     mgr = StrategyManager()
-    mgr.load("default_strategy.py")
+    mgr.load("fluxo_pullback_m5.py")
     signals = 0
     try:
         for _ in range(15):
@@ -264,6 +285,142 @@ async def check_live_connection(report: IntegrityReport) -> None:
         await engine.stop()
 
 
+def check_accuracy_filters(report: IntegrityReport) -> None:
+    """Valida filtros de acertividade (brain + orquestrador)."""
+    import numpy as np
+    from order_guard import OrderGuard
+    from orchestrator import MarketType, StrategyOrchestrator
+    from signal_brain import SignalBrain
+    from strategy_manager import StrategyManager
+
+    brain = SignalBrain(min_confidence=52, cooldown_candles=2, min_adx=14)
+    df_lateral = _make_ohlc(80, drift=0.0)
+    ctx_lateral = brain._compute_context(df_lateral)
+
+    blocked = brain._apply_filters(
+        "COMPRA", 65, ctx_lateral, market_type="BAIXA_VOLATILIDADE_LATERAL"
+    )
+    report.add(
+        "acuracia:brain_range_adx",
+        blocked is None,
+        "OK" if blocked is None else blocked[:60],
+    )
+
+    rng = np.random.default_rng(2)
+    prices = [641.0]
+    for i in range(99):
+        step = 0.25 if i > 40 else 0.02
+        prices.append(prices[-1] + step)
+    df_trend = _make_ohlc_from_prices(prices)
+
+    orch = StrategyOrchestrator(
+        StrategyManager(), OrderGuard(lock_on_signal=False), ROOT / "compiled_strategies"
+    )
+    market = orch.analyze_market(df_trend)
+    ok_trend = market.market_type in (
+        MarketType.ALTA_VOLATILIDADE_TENDENCIAL,
+        MarketType.TENDENCIAL_MODERADA,
+        MarketType.ROMPIMENTO,
+    )
+    report.add(
+        "acuracia:orch_classifica",
+        ok_trend,
+        f"{market.market_type.value} adx={market.adx:.0f} atr={market.atr_pct:.4%}",
+    )
+
+    # Volume zero: proxy de amplitude deve funcionar
+    from strategy_manager import StrategyManager as SM
+
+    mgr = SM()
+    mgr.load("engolfo_volume_m5.py")
+    r = mgr.analyze(_make_ohlc(25, drift=0.02))
+    report.add("acuracia:volume_proxy", "Erro" not in str(r.get("reason", "")), str(r.get("reason", ""))[:50])
+
+    from binary_master import apply_binary_options_filters, warmup_result
+
+    warm = warmup_result(_make_ohlc(10, drift=0.0), "fluxo_pullback_m5.py")
+    report.add("acuracia:warmup_m5", warm is not None and "Aquecimento" in warm.get("reason", ""))
+
+    df80 = _make_ohlc(80, drift=0.02)
+    fake_signal = {"signal": "COMPRA", "confidence": 80, "reason": "teste", "price": 641.0}
+    market = orch.analyze_market(df80)
+    blocked = apply_binary_options_filters(fake_signal, market, df80, "fluxo_pullback_m5.py")
+    report.add(
+        "acuracia:binary_master",
+        blocked.get("signal") is None or "Mestre" in str(blocked.get("reason", "")),
+        str(blocked.get("reason", ""))[:50],
+    )
+
+
+def _make_ohlc(n: int, drift: float = 0.0) -> pd.DataFrame:
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    prices = [641.0]
+    for _ in range(n - 1):
+        prices.append(prices[-1] + drift + rng.normal(0, 0.05))
+    return _make_ohlc_from_prices(prices)
+
+
+def _make_ohlc_from_prices(prices: list[float]) -> pd.DataFrame:
+    import pandas as pd
+
+    return pd.DataFrame(
+        {
+            "timestamp": [datetime.now(timezone.utc) for _ in prices],
+            "open": prices,
+            "high": [p + 0.1 for p in prices],
+            "low": [p - 0.1 for p in prices],
+            "close": prices,
+            "volume": [0.0] * len(prices),
+        }
+    )
+
+
+def check_orchestrator(report: IntegrityReport) -> None:
+    import numpy as np
+    import pandas as pd
+    from order_guard import OrderGuard
+    from orchestrator import MarketType, StrategyOrchestrator
+    from strategy_manager import StrategyManager
+
+    rng = np.random.default_rng(1)
+    rows = 100
+    prices = [641.0]
+    for _ in range(rows - 1):
+        prices.append(prices[-1] + rng.normal(0, 0.2))
+    df = pd.DataFrame(
+        {
+            "timestamp": [datetime.now(timezone.utc) for _ in range(rows)],
+            "open": prices,
+            "high": [p + 0.15 for p in prices],
+            "low": [p - 0.15 for p in prices],
+            "close": prices,
+            "volume": [100.0] * rows,
+        }
+    )
+
+    mgr = StrategyManager()
+    guard = OrderGuard(lock_on_signal=False)
+    orch = StrategyOrchestrator(mgr, guard, ROOT / "compiled_strategies")
+    decision = orch.prepare_cycle(df)
+    ok = decision.strategy_file.endswith(".py") and decision.market.market_type in MarketType
+    report.add(
+        "orquestrador:decisao",
+        ok,
+        f"{decision.market.market_type.value} score={decision.score:.0f} -> {decision.strategy_file}",
+    )
+
+    guard2 = OrderGuard(lock_on_signal=True, lock_on_signal_seconds=300)
+    orch2 = StrategyOrchestrator(StrategyManager(), guard2, ROOT / "compiled_strategies")
+    orch2.prepare_cycle(df)
+    before = orch2.current_strategy_file
+    guard2.on_signal_emitted()
+    orch2.prepare_cycle(df)
+    blocked = orch2.current_strategy_file == before and guard2.order_status == "OPEN"
+    report.add("orquestrador:order_guard", blocked, f"status={guard2.order_status}")
+
+
 def check_required_files(report: IntegrityReport) -> None:
     required = [
         "main.py",
@@ -271,9 +428,11 @@ def check_required_files(report: IntegrityReport) -> None:
         "requirements.txt",
         ".env.example",
         "data_engine.py",
-        "compiled_strategies/default_strategy.py",
+        "orchestrator.py",
+        "strategy_registry.py",
+        "bot_settings.txt",
         "compiled_strategies/fluxo_pullback_m5.py",
-        "strategies/default_strategy.txt",
+        "compiled_strategies/breakout_donchian_m5.py",
     ]
     for rel in required:
         report.add(f"arquivo:{rel}", (ROOT / rel).is_file())
@@ -294,6 +453,8 @@ async def run_all() -> IntegrityReport:
     check_price_extraction(report)
     check_api_helpers(report)
     check_cache(report)
+    check_orchestrator(report)
+    check_accuracy_filters(report)
     check_strategies_analyze(report)
     await check_simulation(report)
     await check_live_connection(report)

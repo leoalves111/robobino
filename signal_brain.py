@@ -63,13 +63,16 @@ class SignalBrain:
 
         signal = enriched.get("signal")
         reason = str(enriched.get("reason", ""))
+        market_type = str(enriched.get("_market_type") or "")
 
         if signal is None:
             enriched["reason"] = reason or ctx.summary
             self.last_analysis = enriched
             return enriched
 
-        block_reason = self._apply_filters(signal, enriched["confidence"], ctx)
+        block_reason = self._apply_filters(
+            signal, enriched["confidence"], ctx, market_type=market_type
+        )
         if block_reason:
             enriched["signal"] = None
             enriched["reason"] = block_reason
@@ -83,17 +86,34 @@ class SignalBrain:
         self.last_analysis = enriched
         return enriched
 
-    def _apply_filters(self, signal: str, confidence: int, ctx: MarketContext) -> str | None:
-        if ctx.adx < self.min_adx and confidence < 80:
+    def _apply_filters(
+        self,
+        signal: str,
+        confidence: int,
+        ctx: MarketContext,
+        *,
+        market_type: str = "",
+    ) -> str | None:
+        range_market = market_type == "BAIXA_VOLATILIDADE_LATERAL" or ctx.regime == "LATERAL"
+        trend_market = market_type in (
+            "ALTA_VOLATILIDADE_TENDENCIAL",
+            "TENDENCIAL_MODERADA",
+            "ROMPIMENTO",
+        )
+
+        # Range: osciladores — não exige ADX alto
+        if not range_market and ctx.adx < self.min_adx and confidence < 80:
             return f"Mercado sem tendência (ADX {ctx.adx:.0f}) — sinal ignorado"
 
-        if ctx.atr_pct < 0.0002:
+        # Tendência: exige volatilidade mínima
+        min_atr = 0.00015 if range_market else 0.0002
+        if ctx.atr_pct < min_atr:
             return "Volatilidade insuficiente — aguardando movimento"
 
-        if signal == "COMPRA" and ctx.regime == "BAIXA" and confidence < 75:
+        if signal == "COMPRA" and ctx.regime == "BAIXA" and confidence < 75 and trend_market:
             return f"COMPRA contra tendência de baixa ({confidence}% confiança)"
 
-        if signal == "VENDA" and ctx.regime == "ALTA" and confidence < 75:
+        if signal == "VENDA" and ctx.regime == "ALTA" and confidence < 75 and trend_market:
             return f"VENDA contra tendência de alta ({confidence}% confiança)"
 
         if self._state.last_signal == signal:
@@ -101,8 +121,12 @@ class SignalBrain:
             if elapsed <= self.cooldown_candles and confidence < 85:
                 return f"Cooldown ativo — {signal} recente ({elapsed} velas)"
 
-        if confidence < self.min_confidence:
-            return f"Confiança insuficiente ({confidence}% < {self.min_confidence}%)"
+        min_conf = self.min_confidence
+        if range_market and confidence >= 58:
+            min_conf = min(min_conf, 58)
+
+        if confidence < min_conf:
+            return f"Confiança insuficiente ({confidence}% < {min_conf}%)"
 
         return None
 

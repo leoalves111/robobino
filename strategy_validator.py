@@ -74,7 +74,7 @@ def resolve_source_file(strategies_dir: Path | str, strategy_ref: str) -> Path:
     if not ref:
         raise StrategyValidationError(
             "STRATEGY_FILE não definido no .env. "
-            "Exemplo: STRATEGY_FILE=default_strategy.txt"
+            "Orquestrador autonomo — STRATEGY_FILE nao e necessario."
         )
 
     path = Path(ref)
@@ -123,15 +123,43 @@ def validate_selected_strategy(
     )
 
 
+def validate_registered_compiled(
+    compiled_dir: Path | str = "compiled_strategies",
+) -> list[ValidationResult]:
+    """Valida catálogo oficial — só .py em compiled_strategies/ (sem .txt obrigatório)."""
+    from strategy_registry import STRATEGY_CATALOG, validate_compiled_dir
+
+    base = Path(compiled_dir)
+    missing = validate_compiled_dir(base)
+    if missing:
+        raise StrategyValidationError(
+            "Estrategias ausentes em compiled_strategies/:\n"
+            + "\n".join(f"  - {n}" for n in missing)
+            + "\n\nVeja strategy_registry.py e adicione os .py faltantes."
+        )
+
+    results: list[ValidationResult] = []
+    for entry in STRATEGY_CATALOG:
+        compiled = base / entry.filename
+        results.append(
+            ValidationResult(
+                ok=True,
+                source_file=compiled,
+                compiled_file=compiled,
+                strategy_name=entry.name,
+                message="OK",
+            )
+        )
+    return results
+
+
 def validate_all_strategies(
     strategies_dir: Path | str = "strategies",
     compiled_dir: Path | str = "compiled_strategies",
 ) -> list[ValidationResult]:
     documents = scan_source_documents(strategies_dir)
     if not documents:
-        raise StrategyValidationError(
-            f"Nenhum documento (.txt/.pdf) encontrado em {strategies_dir}/."
-        )
+        return validate_registered_compiled(compiled_dir)
 
     pending: list[str] = []
     results: list[ValidationResult] = []
@@ -155,6 +183,8 @@ def validate_all_strategies(
     if pending:
         raise StrategyValidationError("\n\n".join(pending))
 
+    registry = validate_registered_compiled(compiled_dir)
+    results.extend(registry)
     return results
 
 
@@ -171,17 +201,14 @@ def run_startup_validation(
     results = validate_all_strategies(strategies_dir, compiled_dir)
 
     if headless:
-        log.info("Validacao de estrategias: %d documento(s) OK", len(results))
+        log.info("Validacao de estrategias: %d modulo(s) .py OK", len(results))
         for item in results:
-            log.info("  OK %s -> %s", item.source_file.name, item.compiled_file.name)
+            log.info("  OK %s", item.compiled_file.name)
     else:
-        console.print("\n[bold cyan]═══ VALIDAÇÃO LOCAL DE ESTRATÉGIAS ═══[/bold cyan]\n")
-        for item in results:
-            console.print(
-                f"  [green]✓[/green] {item.source_file.name} → {item.compiled_file.name} "
-                f"[dim](atualizado)[/dim]"
-            )
-        console.print()
+        import logging
+
+        log = logging.getLogger(__name__)
+        log.info("Validacao: %d estrategia(s) .py OK", len(results))
     return results
 
 

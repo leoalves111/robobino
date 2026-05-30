@@ -9,9 +9,8 @@ import sys
 
 from dotenv import load_dotenv
 
+from bot_settings import log_strategy_catalog, read_bot_settings
 from data_engine import DataEngine
-from strategy_manager import StrategyManager
-from bot_settings import load_strategy_by_number, read_bot_settings
 from strategy_validator import StrategyValidationError, run_startup_validation
 
 load_dotenv()
@@ -41,12 +40,9 @@ async def main() -> None:
         print(f"\n✖ {exc}\n", file=sys.stderr)
         sys.exit(1)
 
-    settings = read_bot_settings()
-    selected = load_strategy_by_number(compiled_dir, settings.strategy_number)
-
-    strategy = StrategyManager(compiled_dir)
-    strategy.activate(selected)
-    print(f"Estratégia ativa: {strategy.name} ({strategy.module_path.name})")
+    read_bot_settings()
+    log_strategy_catalog(compiled_dir)
+    print("Modo: orquestrador autonomo (escolhe estrategia por mercado)")
 
     engine = DataEngine(
         auth_token=auth,
@@ -63,7 +59,7 @@ async def main() -> None:
         sys.exit(1)
 
     balance = result.get("balance")
-    print(f"Conexão OK | RIC: {result['asset_ric']}", end="")
+    print(f"Conexao OK | RIC: {result['asset_ric']}", end="")
     if balance is not None:
         print(f" | Saldo: ${balance:.2f}")
     else:

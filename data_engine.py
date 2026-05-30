@@ -171,6 +171,7 @@ class DataEngineState:
     cache_status: str = "—"
     status_message: str = "Inicializando"
     reconnect_attempts: int = 0
+    order_status: str = "NONE"
 
 
 class DataEngine:
@@ -186,12 +187,14 @@ class DataEngine:
         asset_name: str = "Crypto IDX",
         timeframe_seconds: int = 300,
         demo: bool = True,
+        order_guard: Any | None = None,
     ) -> None:
         self.auth_token = auth_token
         self.device_id = device_id
         self.asset_name = asset_name
         self.timeframe_seconds = timeframe_seconds
         self.demo = demo
+        self._order_guard = order_guard
 
         self.asset_ric = CRYPTO_IDX_RIC
         self.asset_id = CRYPTO_IDX_ID
@@ -464,6 +467,10 @@ class DataEngine:
             return
 
         self._maybe_ingest_candles(payload)
+
+        if self._order_guard is not None:
+            self._order_guard.ingest_message(event, payload)
+            self.state.order_status = self._order_guard.order_status
 
         if not self._is_target_asset(topic, payload, event):
             return

@@ -83,13 +83,15 @@ class StrategyManager:
         self._loaded = loaded
         return self._loaded
 
-    def analyze(self, df: pd.DataFrame) -> dict[str, Any]:
+    def analyze(self, df: pd.DataFrame, *, market_type: str | None = None) -> dict[str, Any]:
         if self._loaded is None:
             raise RuntimeError("Estratégia não carregada. Chame load() primeiro.")
 
         try:
             raw = self._loaded.analisar(df)
             normalized = _normalize_result(raw, df)
+            if market_type:
+                normalized["_market_type"] = market_type
             return self.brain.process(normalized, df)
         except Exception as exc:
             logger.error("Erro na estratégia %s: %s", self._loaded.name, exc)

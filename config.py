@@ -14,8 +14,6 @@ from dotenv import load_dotenv
 _ENV_LOADED = False
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-# Estratégia: número em bot_settings.txt (padrão 2 = Fluxo & Pullback M5 Pro)
-DEFAULT_STRATEGY_NUMBER = 2
 DEFAULT_RUN_MODE = "normal"
 
 
