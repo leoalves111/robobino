@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from data_engine import DataEngine
 from strategy_manager import StrategyManager
-from strategy_selector import prompt_strategy_selection
+from bot_settings import load_strategy_by_number, read_bot_settings
 from strategy_validator import StrategyValidationError, run_startup_validation
 
 load_dotenv()
@@ -41,7 +41,8 @@ async def main() -> None:
         print(f"\n✖ {exc}\n", file=sys.stderr)
         sys.exit(1)
 
-    selected = prompt_strategy_selection(compiled_dir)
+    settings = read_bot_settings()
+    selected = load_strategy_by_number(compiled_dir, settings.strategy_number)
 
     strategy = StrategyManager(compiled_dir)
     strategy.activate(selected)

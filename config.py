@@ -5,6 +5,7 @@ Configuração centralizada — carrega .env e valida credenciais.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,10 @@ from dotenv import load_dotenv
 
 _ENV_LOADED = False
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+# Estratégia: número em bot_settings.txt (padrão 2 = Fluxo & Pullback M5 Pro)
+DEFAULT_STRATEGY_NUMBER = 2
+DEFAULT_RUN_MODE = "normal"
 
 
 def load_env(force: bool = False) -> Path:
@@ -25,6 +30,29 @@ def load_env(force: bool = False) -> Path:
 
 def _flag(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_interactive_terminal() -> bool:
+    """False em PM2, systemd, Docker ou pipes — evita input() bloqueante."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def resolve_headless() -> bool:
+    """
+    HEADLESS explícito no .env tem prioridade.
+    Caso contrário: ativa automaticamente sem terminal (PM2/Linux).
+    """
+    raw = os.getenv("HEADLESS", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if os.getenv("PM2_HOME") or os.getenv("PM2_USAGE"):
+        return True
+    return not is_interactive_terminal()
 
 
 @dataclass(frozen=True)
@@ -41,7 +69,6 @@ class AppConfig:
     min_adx: float
     headless: bool
     run_mode: str
-    auto_strategy: str
     connect_max_retries: int
     connect_retry_seconds: float
     log_level: str
@@ -63,9 +90,8 @@ class AppConfig:
             min_confidence=int(os.getenv("MIN_CONFIDENCE", "52")),
             signal_cooldown_candles=int(os.getenv("SIGNAL_COOLDOWN_CANDLES", "2")),
             min_adx=float(os.getenv("MIN_ADX", "14")),
-            headless=_flag("HEADLESS", False),
-            run_mode=os.getenv("RUN_MODE", "").strip().lower(),
-            auto_strategy=os.getenv("AUTO_STRATEGY", "").strip(),
+            headless=resolve_headless(),
+            run_mode=os.getenv("RUN_MODE", DEFAULT_RUN_MODE).strip().lower(),
             connect_max_retries=int(os.getenv("CONNECT_MAX_RETRIES", "10")),
             connect_retry_seconds=float(os.getenv("CONNECT_RETRY_SECONDS", "15")),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),

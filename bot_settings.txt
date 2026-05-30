@@ -1,0 +1,9 @@
+# Troque APENAS o número da estratégia (1, 2, 3, 4, ...)
+# A lista completa aparece nos logs ao iniciar (pm2 logs).
+#
+# 1 = Estratégia padrão (default_strategy)
+# 2 = Fluxo & Pullback M5 Pro  ← PADRÃO DO ROBÔ
+# 3 = Retração M5
+#
+# Formas aceitas: só o número na linha abaixo, ou ESTRATEGIA=2
+2

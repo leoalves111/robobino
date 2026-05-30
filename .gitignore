@@ -6,3 +6,7 @@ logs/
 .venv/
 venv/
 *.egg-info/
+.pm2/
+.DS_Store
+*.pyc
+.env

@@ -52,6 +52,19 @@ def _build_menu_table(strategies: list[Path]) -> Table:
     return table
 
 
+def load_auto_strategy(
+    compiled_dir: Path | str = "compiled_strategies",
+    strategy_number: int | None = None,
+) -> LoadedStrategy:
+    """Carrega estratégia pelo número em bot_settings.txt (sem input())."""
+    from bot_settings import DEFAULT_STRATEGY_NUMBER, load_strategy_by_number, read_bot_settings
+
+    n = strategy_number
+    if n is None:
+        n = read_bot_settings().strategy_number
+    return load_strategy_by_number(compiled_dir, n or DEFAULT_STRATEGY_NUMBER)
+
+
 def prompt_strategy_selection(
     compiled_dir: Path | str = "compiled_strategies",
 ) -> LoadedStrategy:

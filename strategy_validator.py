@@ -161,21 +161,37 @@ def validate_all_strategies(
 def run_startup_validation(
     strategies_dir: str | Path = "strategies",
     compiled_dir: str | Path = "compiled_strategies",
+    *,
+    headless: bool = False,
 ) -> list[ValidationResult]:
     """Valida integridade local de todos os documentos fonte."""
-    console.print("\n[bold cyan]═══ VALIDAÇÃO LOCAL DE ESTRATÉGIAS ═══[/bold cyan]\n")
+    import logging
+
+    log = logging.getLogger(__name__)
     results = validate_all_strategies(strategies_dir, compiled_dir)
-    for item in results:
-        console.print(
-            f"  [green]✓[/green] {item.source_file.name} → {item.compiled_file.name} "
-            f"[dim](atualizado)[/dim]"
-        )
-    console.print()
+
+    if headless:
+        log.info("Validacao de estrategias: %d documento(s) OK", len(results))
+        for item in results:
+            log.info("  OK %s -> %s", item.source_file.name, item.compiled_file.name)
+    else:
+        console.print("\n[bold cyan]═══ VALIDAÇÃO LOCAL DE ESTRATÉGIAS ═══[/bold cyan]\n")
+        for item in results:
+            console.print(
+                f"  [green]✓[/green] {item.source_file.name} → {item.compiled_file.name} "
+                f"[dim](atualizado)[/dim]"
+            )
+        console.print()
     return results
 
 
-def exit_on_validation_error(exc: StrategyValidationError) -> None:
-    console.print(f"\n[bold red]✖ COMPILAÇÃO NECESSÁRIA[/bold red]\n")
-    console.print(str(exc))
-    console.print()
+def exit_on_validation_error(exc: StrategyValidationError, *, headless: bool = False) -> None:
+    import logging
+
+    if headless:
+        logging.getLogger(__name__).critical("Compilacao necessaria: %s", exc)
+    else:
+        console.print(f"\n[bold red]✖ COMPILAÇÃO NECESSÁRIA[/bold red]\n")
+        console.print(str(exc))
+        console.print()
     sys.exit(1)

@@ -22,11 +22,9 @@ from api_connection import (
 from config import AppConfig, load_env
 from data_engine import DataEngine
 from logging_config import setup_logging
-from mode_selector import exit_if_missing_auth_for_normal, prompt_run_mode
+from bot_settings import DEFAULT_RUN_MODE, load_strategy_by_number, read_bot_settings
 from simulation_engine import SimulationEngine
-from strategy_loader import load_strategy
 from strategy_manager import StrategyManager
-from strategy_selector import prompt_strategy_selection
 from strategy_validator import (
     StrategyValidationError,
     exit_on_validation_error,
@@ -52,30 +50,30 @@ class MarketEngine(Protocol):
     async def refresh_balance(self): ...
 
 
-def resolve_startup(config: AppConfig, strategy_mgr: StrategyManager) -> tuple[Any, str]:
-    """Seleciona estratégia e modo (interativo ou headless AWS)."""
-    if config.headless:
-        if not config.auto_strategy:
-            raise EnvironmentError(
-                "HEADLESS=true exige AUTO_STRATEGY no .env "
-                "(ex: AUTO_STRATEGY=fluxo_pullback_m5.py)"
-            )
-        mode = config.run_mode or "normal"
-        if mode not in ("normal", "simulation"):
-            raise EnvironmentError("RUN_MODE deve ser 'normal' ou 'simulation'")
-        loaded = load_strategy(config.auto_strategy, config.compiled_dir)
-        strategy_mgr.activate(loaded)
-        logger.info(
-            "Modo headless | estratégia=%s | run_mode=%s",
-            loaded.name,
-            mode,
-        )
-        return loaded, mode
+def resolve_startup(config: AppConfig, strategy_mgr: StrategyManager) -> str:
+    """
+    Início 100% autónomo: lê bot_settings.txt (número da estratégia) e modo normal real.
+    Nunca pergunta estratégia nem modo — adequado a PM2 24/7.
+    """
+    settings = read_bot_settings()
+    loaded = load_strategy_by_number(config.compiled_dir, settings.strategy_number)
+    strategy_mgr.activate(loaded)
 
-    selected = prompt_strategy_selection(config.compiled_dir)
-    run_mode = prompt_run_mode()
-    strategy_mgr.activate(selected)
-    return selected, run_mode
+    mode = DEFAULT_RUN_MODE
+    if config.run_mode and config.run_mode != "normal":
+        logger.warning(
+            "RUN_MODE=%s ignorado — o robô opera sempre em modo normal (velas M5 reais).",
+            config.run_mode,
+        )
+
+    logger.info(
+        "Arranque autónomo | estrategia #%d = %s (%s) | modo=%s | 24/7",
+        settings.strategy_number,
+        loaded.name,
+        loaded.module_path.name,
+        mode,
+    )
+    return mode
 
 
 def create_engine(config: AppConfig, mode: str) -> MarketEngine:
@@ -440,24 +438,30 @@ async def main() -> None:
     config = AppConfig.from_env()
     setup_logging(log_dir=config.log_dir, level=config.log_level)
 
-    logger.info("Binomo Signal Generator iniciando | headless=%s", config.headless)
+    bot = read_bot_settings()
+    logger.info(
+        "Binomo Signal Generator iniciando | headless=%s | estrategia #%d (bot_settings.txt)",
+        config.headless,
+        bot.strategy_number,
+    )
 
     try:
         run_startup_validation(
             strategies_dir=config.strategies_dir,
             compiled_dir=config.compiled_dir,
+            headless=config.headless,
         )
     except StrategyValidationError as exc:
-        exit_on_validation_error(exc)
+        exit_on_validation_error(exc, headless=config.headless)
 
     strategy_mgr = StrategyManager(compiled_dir=config.compiled_dir)
-    _, mode = resolve_startup(config, strategy_mgr)
+    mode = resolve_startup(config, strategy_mgr)
 
-    if mode == "normal" and not config.headless:
-        exit_if_missing_auth_for_normal()
-    elif mode == "normal":
+    if mode == "normal":
         config.validate_auth()
+        logger.info("Credenciais .env validadas (AUTH_TOKEN + DEVICE_ID)")
 
+    logger.info("Entrando em loop resiliente 24/7 — pm2 logs para monitorar")
     await run_resilient(config, strategy_mgr, mode)
 
 
