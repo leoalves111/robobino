@@ -10,7 +10,7 @@ import logging
 import signal
 import sys
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from alert_system import Dashboard, DashboardState
 from api_connection import (
@@ -34,6 +34,9 @@ from strategy_validator import (
     run_startup_validation,
 )
 from trade_log import HeartbeatTracker, log_candle_closed, log_candle_no_signal, log_heartbeat, log_signal
+
+if TYPE_CHECKING:
+    from database_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,7 @@ def create_engine(
     config: AppConfig,
     mode: str,
     order_guard: OrderGuard | None = None,
+    db: DatabaseManager | None = None,
 ) -> MarketEngine:
     if mode == "simulation":
         return SimulationEngine(asset_name=config.asset_name)
@@ -99,6 +103,7 @@ def create_engine(
         timeframe_seconds=config.timeframe_seconds,
         demo=config.demo_mode,
         order_guard=order_guard,
+        db=db,
     )
 
 
@@ -145,6 +150,7 @@ async def headless_status_loop(
     strategy: StrategyManager,
     stop_event: asyncio.Event,
     orchestrator: StrategyOrchestrator | None = None,
+    db: DatabaseManager | None = None,
     interval: int | None = None,
 ) -> None:
     """Heartbeat enxuto para pm2 — sem repetir filtros a cada ciclo."""
@@ -166,6 +172,13 @@ async def headless_status_loop(
                     order_status=getattr(engine.state, "order_status", "NONE"),
                 )
                 tracker.mark(connected=connected, price=price)
+            if db is not None and orchestrator and orchestrator.last_decision:
+                d = orchestrator.last_decision
+                await db.publish_analysis_state(
+                    strategy_file=d.strategy_file,
+                    market_type=d.market.market_type.value,
+                    order_status=getattr(engine.state, "order_status", "NONE"),
+                )
         except Exception as exc:
             logger.warning("Erro no status loop: %s", exc)
         await asyncio.sleep(tick_sec)
@@ -218,6 +231,7 @@ async def analysis_loop(
     stop_event: asyncio.Event,
     orchestrator: StrategyOrchestrator,
     order_guard: OrderGuard,
+    db: DatabaseManager | None = None,
     *,
     simulation: bool = False,
 ) -> None:
@@ -257,13 +271,57 @@ async def analysis_loop(
             result = orchestrator.analyze(df)
             orch = result.get("orchestrator") or {}
 
+            if db is not None:
+                await db.publish_analysis_state(
+                    strategy_file=str(orch.get("strategy_file", "")),
+                    market_type=str(orch.get("market_type", "")),
+                    order_status=order_guard.order_status if order_guard else "NONE",
+                )
+
             if result.get("signal"):
                 direction = result["signal"]
                 price = result.get("price", candle.close)
                 confidence = int(result.get("confidence") or 0)
                 reason = str(result.get("reason", ""))
+
+                allowed, block_reason = True, ""
+                if db is not None:
+                    allowed, block_reason = await db.can_emit_signal(
+                        local_order_status=order_guard.order_status if order_guard else "NONE"
+                    )
+                    if allowed:
+                        allowed = await db.try_acquire_signal_lock()
+
+                if not allowed:
+                    log_candle_no_signal(
+                        candle_time,
+                        market_type=str(orch.get("market_type", "")),
+                        strategy_file=str(orch.get("strategy_file", "")),
+                        reason=block_reason or "bloqueado multi-instancia",
+                    )
+                    if db is not None:
+                        await db.save_trade_log(
+                            signal=None,
+                            confidence=confidence,
+                            price=float(price),
+                            reason=block_reason,
+                            strategy_file=str(orch.get("strategy_file", "")),
+                            market_type=str(orch.get("market_type", "")),
+                            event_type="FILTER",
+                        )
+                    continue
+
                 if order_guard is not None:
                     order_guard.on_signal_emitted()
+                if db is not None:
+                    await db.save_trade_log(
+                        signal=direction,
+                        confidence=confidence,
+                        price=float(price),
+                        reason=reason,
+                        strategy_file=str(orch.get("strategy_file", "")),
+                        market_type=str(orch.get("market_type", "")),
+                    )
                 if dashboard:
                     dashboard.register_signal(
                         direction=direction,
@@ -303,6 +361,7 @@ async def run_monitor_loop(
     config: AppConfig,
     strategy_mgr: StrategyManager,
     order_guard: OrderGuard,
+    db: DatabaseManager | None = None,
     *,
     mode: str = "normal",
 ) -> None:
@@ -369,6 +428,7 @@ async def run_monitor_loop(
                 simulation=simulation,
                 orchestrator=orchestrator,
                 order_guard=order_guard,
+                db=db,
             ),
             name="analysis",
         ),
@@ -378,7 +438,7 @@ async def run_monitor_loop(
         tasks.append(
             asyncio.create_task(
                 headless_status_loop(
-                    engine, strategy_mgr, stop_event, orchestrator=orchestrator
+                    engine, strategy_mgr, stop_event, orchestrator=orchestrator, db=db
                 ),
                 name="status",
             )
@@ -427,6 +487,7 @@ async def run_resilient(
     strategy_mgr: StrategyManager,
     order_guard: OrderGuard,
     mode: str,
+    db: DatabaseManager | None = None,
 ) -> None:
     """
     Loop externo AWS: reconecta em falhas sem encerrar o processo (pm2 keep-alive).
@@ -441,7 +502,7 @@ async def run_resilient(
                 tentativa_global,
                 mode,
             )
-            engine = create_engine(config, mode, order_guard=order_guard)
+            engine = create_engine(config, mode, order_guard=order_guard, db=db)
 
             ok = await conectar_com_retry(
                 engine,
@@ -459,6 +520,7 @@ async def run_resilient(
                 strategy_mgr,
                 order_guard,
                 mode=mode,
+                db=db,
             )
             logger.info("Sessão #%d encerrada normalmente", tentativa_global)
             break
@@ -517,12 +579,20 @@ async def main() -> None:
     )
     mode = resolve_startup(config, strategy_mgr)
 
-    if mode == "normal":
-        config.validate_auth()
-        logger.info("Credenciais .env validadas (AUTH_TOKEN + DEVICE_ID)")
+    from database_manager import DatabaseManager
 
-    logger.info("Loop resiliente 24/7 — pm2 logs para monitorar")
-    await run_resilient(config, strategy_mgr, order_guard, mode)
+    db = await DatabaseManager.create_from_env()
+    await db.start()
+
+    try:
+        if mode == "normal":
+            config.validate_auth()
+            logger.info("Credenciais .env validadas (AUTH_TOKEN + DEVICE_ID)")
+
+        logger.info("Loop resiliente 24/7 — pm2 logs para monitorar")
+        await run_resilient(config, strategy_mgr, order_guard, mode, db=db)
+    finally:
+        await db.close()
 
 
 if __name__ == "__main__":

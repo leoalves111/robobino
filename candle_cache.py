@@ -94,6 +94,10 @@ class CandleCache:
     def is_dirty(self) -> bool:
         return self._dirty
 
+    def export_rows(self) -> list[dict[str, Any]]:
+        """Cópia das velas serializáveis (para Supabase / backup)."""
+        return list(self._rows)
+
     @classmethod
     def policy_from_env(cls, interval_seconds: int) -> CacheFreshnessPolicy:
         import os

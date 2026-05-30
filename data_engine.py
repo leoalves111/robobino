@@ -188,6 +188,7 @@ class DataEngine:
         timeframe_seconds: int = 300,
         demo: bool = True,
         order_guard: Any | None = None,
+        db: Any | None = None,
     ) -> None:
         self.auth_token = auth_token
         self.device_id = device_id
@@ -195,6 +196,7 @@ class DataEngine:
         self.timeframe_seconds = timeframe_seconds
         self.demo = demo
         self._order_guard = order_guard
+        self._db = db
 
         self.asset_ric = CRYPTO_IDX_RIC
         self.asset_id = CRYPTO_IDX_ID
@@ -319,6 +321,14 @@ class DataEngine:
             self._seed_history(result.candles, "cache local")
             return
 
+        if self._db is not None:
+            cloud_rows = await self._db.load_market_cache()
+            if cloud_rows:
+                candles = self._parse_cloud_rows(cloud_rows)
+                if candles:
+                    self._seed_history(candles, "cache Supabase")
+                    return
+
         self.state.history_loaded = False
         expired = result.message.startswith("expirado")
         if expired:
@@ -381,6 +391,28 @@ class DataEngine:
                 logger.debug("Falha histórico %s: %s", url, exc)
 
         return []
+
+    def _parse_cloud_rows(self, rows: list[dict[str, Any]]) -> list[Candle]:
+        candles: list[Candle] = []
+        for item in rows:
+            candle = self._parse_candle_item(item) if "open" in item else None
+            if candle is None and item.get("timestamp"):
+                try:
+                    candle = self._parse_candle_item(
+                        {
+                            "timestamp": item.get("timestamp"),
+                            "open": item.get("open"),
+                            "high": item.get("high"),
+                            "low": item.get("low"),
+                            "close": item.get("close"),
+                            "volume": item.get("volume", 0),
+                        }
+                    )
+                except Exception:
+                    candle = None
+            if candle:
+                candles.append(candle)
+        return candles
 
     def _fetch_live_rate_sync(self) -> Optional[float]:
         headers = self._auth_headers()
@@ -668,6 +700,11 @@ class DataEngine:
 
     async def flush_cache(self) -> None:
         await asyncio.to_thread(self._cache.flush)
+        if self._db is not None and self._cache.count:
+            try:
+                await self._db.upsert_market_cache(self._cache.export_rows())
+            except Exception as exc:
+                logger.debug("Flush Supabase falhou: %s", exc)
 
     async def stop(self) -> None:
         self._running = False

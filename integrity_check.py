@@ -66,6 +66,7 @@ def check_imports(report: IntegrityReport) -> None:
         "binary_master",
         "bot_settings",
         "trade_log",
+        "database_manager",
         "order_guard",
         "simulation_engine",
         "simulation_data",
